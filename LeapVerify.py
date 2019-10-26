@@ -1,112 +1,231 @@
 #!/usr/bin/python2
 
-import Leap, sys, thread, time
-from Leap import CircleGesture, KeyTapGesture, ScreenTapGesture, SwipeGesture
+import Leap, sys, thread, time, threading, signal
 
-GESTURE_NONE = 0
-GESTURE_PINCH1 = 1
-GESTURE_PINCH2 = 2
-GESTURE_PINCH3 = 3
-GESTURE_PINCH4 = 4
-GESTURE_ERROR = 5
-ERROR_THRESHOLD = 20
+SET_ERR_TRESH = 10
+VERIFY_ERR_TRESH = 20
 
-PASSWORD = [GESTURE_PINCH1, GESTURE_PINCH3, GESTURE_PINCH2, GESTURE_PINCH4]
+class VeriGesture():
+    def __init__(self, hand):
+        self.fingers = [None] * 5
+        self.tips = [None] * 5
+        self.distances = []
+
+        for f in hand.fingers:
+            self.fingers[f.type] = f
+            self.tips[f.type] = f.bone(Leap.Bone.TYPE_DISTAL).next_joint
+        for f in self.fingers:
+            if f is None:
+                print "Fuck, I don't have all my fingers."
+        
+        for i in range(4):
+            for j in range(4 - i):
+                self.distances.append(self.tips[i].distance_to(self.tips[i + 1 + j]))
+    
+    def compare(self, gesture, treshold):
+        for i in range(10):
+            if abs(self.distances[i] - gesture.distances[i]) > treshold:
+                return False
+        return True
+
+class VeriPassword():
+    def __init__(self, gestures):
+        if gestures is not None:
+            self.gestures = gestures
+        else:
+            self.gestures = []
+        self.index = 0
+        self.set_mode = gestures == None
+        self.temp_gestures = [None] * 61
+        self.temp_index = 0
+        self.verified = threading.Event()
+
+    def frame(self, hand):
+        if self.verified.is_set():
+            return
+        if self.set_mode:
+            self.gesture_set(hand)
+        else:
+            self.gesture_verify(hand)
+
+    def gesture_reset(self):
+        self.temp_gestures[0] = self.temp_gestures[self.temp_index]
+        self.temp_index = 1
+
+    def gesture_set(self, hand):
+        self.temp_gestures[self.temp_index] = VeriGesture(hand)
+        if self.temp_index == 0:
+            self.temp_index += 1
+            return
+
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 1], SET_ERR_TRESH):
+            self.gesture_reset()
+            return
+        if self.temp_index % 10 != 0:
+            self.temp_index += 1
+            return
+        
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 10], SET_ERR_TRESH):
+            self.gesture_reset()
+            return
+        if self.temp_index != 60:
+            self.temp_index += 1
+            return
+
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 60], SET_ERR_TRESH):
+            self.gesture_reset()
+            return
+
+        self.gestures.append(self.temp_gestures[55])
+        self.temp_index = 0
+        print "*",
+        sys.stdout.flush()
+
+    def gesture_verify(self, hand):
+        self.temp_gestures[self.temp_index] = VeriGesture(hand)
+        if self.temp_index == 0:
+            self.temp_index += 1
+            return
+
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 1], SET_ERR_TRESH):
+            self.gesture_reset()
+            return
+        if self.temp_index % 10 != 0:
+            self.temp_index += 1
+            return
+        
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 10], SET_ERR_TRESH):
+            self.gesture_reset()
+            return
+        if self.temp_index != 30:
+            self.temp_index += 1
+            return
+
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 30], SET_ERR_TRESH):
+            self.gesture_reset()
+            return
+
+        if self.gestures[self.index].compare(self.temp_gestures[25], VERIFY_ERR_TRESH):
+            self.index += 1
+            print "*",
+            sys.stdout.flush()
+            self.temp_index = 0
+        else:
+            self.index = 0
+            print "\r                                \r",
+            sys.stdout.flush()
+            self.temp_index = 0
+            return
+        
+        if self.index >= len(self.gestures):
+            self.verified.set()
+            self.index = 0
+
+    def save(self):
+        if len(self.gestures) == 0:
+            print "Error: Empty password."
+            return False
+        print "Password successfully set."
+        self.set_mode = False
+        return True
 
 class VeriListener(Leap.Listener):
     def __init__(self):
         super(VeriListener, self).__init__()
-        self.gesture_err = False
-        self.password_index = 0
+        self.callback = None
+        self.callback_lock = threading.Lock()
+        self.err_msg = False
+
+    def set_callback(self, callback):
+        self.callback_lock.acquire()
+        self.callback = callback
+        self.callback_lock.release()
 
     def on_frame(self, controller):
-        # Find the gesture
+        # Get recent frame and check there is a valid gesture
         frame = controller.frame()
-        gesture = self.find_gesture(frame)
-
-        # Print or remove error message
-        if gesture == GESTURE_ERROR:
-            if not self.gesture_err:
-                print 'Please only use one hand.\r',
-                sys.stdout.flush()
-                self.gesture_err = True
+        if not self.single_hand(frame):
             return
-        if self.gesture_err:
-            print '                         \r',
-            sys.stdout.flush()
-            self.gesture_err = False
-        
-        # No new gesture detected
-        if gesture == PASSWORD[self.password_index - 1] or gesture == GESTURE_NONE:
+        if self.no_gesture(frame):
             return
-        
-        # Check gesture
-        if gesture == PASSWORD[self.password_index]:
-            self.password_index += 1
-            print '*',
-            sys.stdout.flush()
-            if self.password_index == 4:
-                print '\nAuthenticated'
-                self.password_index = 0
-        else:
-            self.password_index = 0
-            print '\r    \r',
-            sys.stdout.flush()
 
-    def find_gesture(self, frame):
-        # Check if exactly one hand is present
+        # If there is one, pass it to the callback object
+        if self.callback is not None:
+            self.callback.frame(frame.hands[0])
+
+    def single_hand(self, frame):
         if (len(frame.hands) > 1):
-            return GESTURE_ERROR
-        if (len(frame.hands) < 1):
-            return GESTURE_NONE
-        
-        # Save the errors of the gestures
-        errors = []
-        errors.append(self.pinch(frame.hands[0], Leap.Finger.TYPE_INDEX))
-        errors.append(self.pinch(frame.hands[0], Leap.Finger.TYPE_MIDDLE))
-        errors.append(self.pinch(frame.hands[0], Leap.Finger.TYPE_RING))
-        errors.append(self.pinch(frame.hands[0], Leap.Finger.TYPE_PINKY))
+            if not self.err_msg:
+                print "\rPlease only use one hand.",
+                sys.stdout.flush()
+                self.err_msg = True
+            return False
 
-        min_error_index = 0
-        for i in range(len(errors)):
-            if errors[i] < errors[min_error_index]:
-                min_error_index = i
-        
-        if errors[min_error_index] < ERROR_THRESHOLD:
-            return min_error_index + 1
-        else:
-            return GESTURE_NONE
-    
-    def pinch(self, hand, other_finger):
-        thumb = None
-        other = None
-        for f in hand.fingers:
-            if f.type == Leap.Finger.TYPE_THUMB:
-                thumb = f.bone(Leap.Bone.TYPE_DISTAL).next_joint
-            if f.type == other_finger:
-                other = f.bone(Leap.Bone.TYPE_DISTAL).next_joint
-        
-        if thumb is not None and other is not None:
-            return thumb.distance_to(other)
-        return 1000
+        if self.err_msg == True:
+            print "\r                         \r",
+            sys.stdout.flush()
+            self.err_msg = False
+
+        if (len(frame.hands) < 1):
+            return False
+
+        return True
+
+    def no_gesture(self, frame):
+        for f in frame.hands[0].fingers:
+            angle_sum = 0
+            for i in range(3):
+                angle_sum += f.bone(i).direction.angle_to(f.bone(i+1).direction)
+
+            if f.type == Leap.Finger.TYPE_THUMB and angle_sum > 1.0:
+                return False
+            if angle_sum > 2.0:
+                return False
+            
+        return True
+
+
+def set_password(password):
+    try:
+        input("Gesture your password and type Enter.\n")
+    except KeyboardInterrupt:
+        print "\nRemoving listener. Bye."
+        return False
+    except SyntaxError:
+        return password.save()
+    return False
+
+def check_password(password):
+    print "Please input your password."
+    try:
+        while not password.verified.wait(1000):
+            pass
+    except:
+        print "\nRemoving listener. Bye."
+        return False
+    return True
 
 def main():
-    # Create a gesture verification listener and a leap controller
+    # Create a gesture listener and a leap controller
     listener = VeriListener()
     controller = Leap.Controller()
-
-    # Add the listener to controllers listener list
     controller.add_listener(listener)
 
-    # Make sure the user can cancel
-    print "Press Enter to quit..."
-    try:
-        raw_input()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        # Remove the listener when we're done
+    # Create password verifier and assign it to listener
+    password = VeriPassword(None)
+    listener.set_callback(password)
+
+    # Set password
+    if not set_password(password):
         controller.remove_listener(listener)
+        return
+
+    # Check password
+    if check_password(password):
+        print "\nSuccessfully verified"
+    
+    # Remove the listener when we're done
+    controller.remove_listener(listener)
 
 if __name__ == "__main__":
     main()
