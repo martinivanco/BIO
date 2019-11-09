@@ -2,8 +2,8 @@
 
 import Leap, sys, thread, time, threading, signal
 
-SET_ERR_TRESH = 10
-VERIFY_ERR_TRESH = 20
+HOLD_ERR_TRESH = 10
+VERIFY_ERR_TRESH = 30
 
 class VeriGesture():
     def __init__(self, hand):
@@ -16,7 +16,7 @@ class VeriGesture():
             self.tips[f.type] = f.bone(Leap.Bone.TYPE_DISTAL).next_joint
         for f in self.fingers:
             if f is None:
-                print "Fuck, I don't have all my fingers."
+                print "Well, I did not expect that."
         
         for i in range(4):
             for j in range(4 - i):
@@ -30,12 +30,9 @@ class VeriGesture():
 
 class VeriPassword():
     def __init__(self, gestures):
-        if gestures is not None:
-            self.gestures = gestures
-        else:
-            self.gestures = []
+        self.gestures = gestures if gestures is not None else []
         self.index = 0
-        self.set_mode = gestures == None
+        self.mode = 0 if gestures is None else 2
         self.temp_gestures = [None] * 61
         self.temp_index = 0
         self.verified = threading.Event()
@@ -43,37 +40,45 @@ class VeriPassword():
     def frame(self, hand):
         if self.verified.is_set():
             return
-        if self.set_mode:
+
+        if self.mode == 0:
             self.gesture_set(hand)
-        else:
+        if self.mode == 1:
+            pass
+        if self.mode == 2:
             self.gesture_verify(hand)
 
     def gesture_reset(self):
         self.temp_gestures[0] = self.temp_gestures[self.temp_index]
         self.temp_index = 1
 
-    def gesture_set(self, hand):
+    def gesture_hold(self, frame_count, hand):
         self.temp_gestures[self.temp_index] = VeriGesture(hand)
         if self.temp_index == 0:
             self.temp_index += 1
-            return
+            return False
 
-        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 1], SET_ERR_TRESH):
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 1], HOLD_ERR_TRESH):
             self.gesture_reset()
-            return
+            return False
         if self.temp_index % 10 != 0:
             self.temp_index += 1
-            return
+            return False
         
-        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 10], SET_ERR_TRESH):
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 10], HOLD_ERR_TRESH):
             self.gesture_reset()
-            return
-        if self.temp_index != 60:
+            return False
+        if self.temp_index != frame_count:
             self.temp_index += 1
-            return
+            return False
 
-        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 60], SET_ERR_TRESH):
+        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - frame_count], HOLD_ERR_TRESH):
             self.gesture_reset()
+            return False
+        return True
+
+    def gesture_set(self, hand):
+        if not self.gesture_hold(60, hand):
             return
 
         self.gestures.append(self.temp_gestures[55])
@@ -82,39 +87,18 @@ class VeriPassword():
         sys.stdout.flush()
 
     def gesture_verify(self, hand):
-        self.temp_gestures[self.temp_index] = VeriGesture(hand)
-        if self.temp_index == 0:
-            self.temp_index += 1
+        if not self.gesture_hold(40, hand):
             return
-
-        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 1], SET_ERR_TRESH):
-            self.gesture_reset()
-            return
-        if self.temp_index % 10 != 0:
-            self.temp_index += 1
-            return
-        
-        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 10], SET_ERR_TRESH):
-            self.gesture_reset()
-            return
-        if self.temp_index != 30:
-            self.temp_index += 1
-            return
-
-        if not self.temp_gestures[self.temp_index].compare(self.temp_gestures[self.temp_index - 30], SET_ERR_TRESH):
-            self.gesture_reset()
-            return
+        self.temp_index = 0
 
         if self.gestures[self.index].compare(self.temp_gestures[25], VERIFY_ERR_TRESH):
             self.index += 1
             print "*",
             sys.stdout.flush()
-            self.temp_index = 0
         else:
             self.index = 0
             print "\r                                \r",
             sys.stdout.flush()
-            self.temp_index = 0
             return
         
         if self.index >= len(self.gestures):
@@ -126,7 +110,7 @@ class VeriPassword():
             print "Error: Empty password."
             return False
         print "Password successfully set."
-        self.set_mode = False
+        self.mode = 2
         return True
 
 class VeriListener(Leap.Listener):
