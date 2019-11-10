@@ -3,7 +3,8 @@
 import Leap, sys, thread, time, threading, signal
 
 HOLD_ERR_TRESH = 10
-VERIFY_ERR_TRESH = 30
+CHECK_ERR_TRESH = 40
+VERIFY_ERR_TRESH = 28
 
 class VeriGesture():
     def __init__(self, hand):
@@ -28,23 +29,32 @@ class VeriGesture():
                 return False
         return True
 
+    def average_distances(self, gesture):
+        for i in range(10):
+            self.distances[i] = (self.distances[i] + gesture.distances[i]) / 2
+
 class VeriPassword():
     def __init__(self, gestures):
         self.gestures = gestures if gestures is not None else []
+        self.check_gestures = None
         self.index = 0
         self.mode = 0 if gestures is None else 2
         self.temp_gestures = [None] * 61
         self.temp_index = 0
         self.verified = threading.Event()
+        self.skip = 0
 
     def frame(self, hand):
         if self.verified.is_set():
+            return
+        if self.skip > 0:
+            self.skip -= 1
             return
 
         if self.mode == 0:
             self.gesture_set(hand)
         if self.mode == 1:
-            pass
+            self.gesture_check(hand)
         if self.mode == 2:
             self.gesture_verify(hand)
 
@@ -80,9 +90,23 @@ class VeriPassword():
     def gesture_set(self, hand):
         if not self.gesture_hold(60, hand):
             return
+        self.temp_index = 0
+        self.skip = 30
 
         self.gestures.append(self.temp_gestures[55])
+        print "*",
+        sys.stdout.flush()
+
+    def gesture_check(self,hand):
+        if not self.gesture_hold(60, hand):
+            return
         self.temp_index = 0
+        self.skip = 30
+
+        if self.check_gestures is None:
+            self.check_gestures = []
+
+        self.check_gestures.append(self.temp_gestures[55])
         print "*",
         sys.stdout.flush()
 
@@ -90,8 +114,9 @@ class VeriPassword():
         if not self.gesture_hold(40, hand):
             return
         self.temp_index = 0
+        self.skip = 30
 
-        if self.gestures[self.index].compare(self.temp_gestures[25], VERIFY_ERR_TRESH):
+        if self.gestures[self.index].compare(self.temp_gestures[35], VERIFY_ERR_TRESH):
             self.index += 1
             print "*",
             sys.stdout.flush()
@@ -109,6 +134,19 @@ class VeriPassword():
         if len(self.gestures) == 0:
             print "Error: Empty password."
             return False
+
+        if self.check_gestures is None or len(self.gestures) != len(self.check_gestures):
+            print "Error: Password lengths doesn't match."
+            return False
+
+        for i in range(len(self.gestures)):
+            if self.gestures[i].compare(self.check_gestures[i], CHECK_ERR_TRESH):
+                self.gestures[i].average_distances(self.check_gestures[i])
+                continue
+
+            print "Error: The passwords you gestured are too different. Try again."
+            return False
+        
         print "Password successfully set."
         self.mode = 2
         return True
@@ -161,9 +199,9 @@ class VeriListener(Leap.Listener):
             for i in range(3):
                 angle_sum += f.bone(i).direction.angle_to(f.bone(i+1).direction)
 
-            if f.type == Leap.Finger.TYPE_THUMB and angle_sum > 1.0:
+            if f.type == Leap.Finger.TYPE_THUMB and angle_sum > 0.9:
                 return False
-            if angle_sum > 2.0:
+            if angle_sum > 1.8:
                 return False
             
         return True
@@ -171,15 +209,22 @@ class VeriListener(Leap.Listener):
 
 def set_password(password):
     try:
-        input("Gesture your password and type Enter.\n")
+        raw_input("Gesture your password and type Enter.\n")
     except KeyboardInterrupt:
         print "\nRemoving listener. Bye."
         return False
-    except SyntaxError:
-        return password.save()
-    return False
 
-def check_password(password):
+    password.mode = 1
+
+    try:
+        raw_input("Repeat your password and type Enter.\n")
+    except KeyboardInterrupt:
+        print "\nRemoving listener. Bye."
+        return False
+
+    return password.save()
+
+def verify_password(password):
     print "Please input your password."
     try:
         while not password.verified.wait(1000):
@@ -204,8 +249,8 @@ def main():
         controller.remove_listener(listener)
         return
 
-    # Check password
-    if check_password(password):
+    # Verify password
+    if verify_password(password):
         print "\nSuccessfully verified"
     
     # Remove the listener when we're done
